@@ -120,6 +120,13 @@ function resolveProviderName(settings: CoderSettings): string {
   return 'anthropic';
 }
 
+function resolveBaseUrl(settings: CoderSettings, providerName: string): string | undefined {
+  if (process.env.CODER_BASE_URL) return process.env.CODER_BASE_URL;
+  const modelList = settings.model_list ?? [];
+  const entry = modelList.find((m) => m.provider === providerName);
+  return entry?.base_url || undefined;
+}
+
 function resolveModel(settings: CoderSettings): string {
   // 1. Env var
   if (process.env.CODER_MODEL) return process.env.CODER_MODEL;
@@ -193,8 +200,12 @@ export class VSCodeGatewayClient {
     this.providerName = resolveProviderName(settings);
 
     if (apiKey) {
+      const baseUrl = resolveBaseUrl(settings, this.providerName);
+      const proxy = process.env.CODER_PROXY;
       const providerConfig: ProviderConfig = {
         apiKey: '',
+        baseUrl,
+        proxy: proxy || undefined,
         timeout: 300_000,
         maxRetries: 3,
       };

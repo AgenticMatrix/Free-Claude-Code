@@ -74,6 +74,7 @@
     "@coder/provider": "workspace:*",
     "@coder/shared": "workspace:*",
     "@coder/tools": "workspace:*",
+    "katex": "^0.17.0",
     "marked": "^18.0.4",
     "preact": "^10.26.0",
     "tiktoken": "^1.0.22"

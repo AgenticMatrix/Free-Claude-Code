@@ -49,8 +49,8 @@ body {
   background: var(--coder-bg);
   color: var(--coder-fg);
   font-family: var(--vscode-font-family, 'Segoe UI', sans-serif);
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 1.3;
 }
 
 .coder-app {
@@ -64,12 +64,12 @@ body {
 .chat-list {
   flex: 1;
   overflow-y: auto;
-  padding: 12px;
+  padding: 8px;
 }
 
 .message {
-  margin-bottom: 12px;
-  padding: 8px 12px;
+  margin-bottom: 2px;
+  padding: 4px 8px;
   border-radius: var(--coder-radius);
 }
 
@@ -89,12 +89,12 @@ body {
 }
 
 .message-role {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  opacity: 0.7;
-  margin-bottom: 4px;
+  letter-spacing: 0.3px;
+  opacity: 0.6;
+  margin-bottom: 2px;
   display: block;
 }
 
@@ -386,26 +386,26 @@ body {
 .markdown-body h1,
 .markdown-body h2,
 .markdown-body h3 {
-  margin: 12px 0 6px;
+  margin: 6px 0 2px;
   font-weight: 600;
 }
 
-.markdown-body h1 { font-size: 16px; }
-.markdown-body h2 { font-size: 15px; }
-.markdown-body h3 { font-size: 14px; }
+.markdown-body h1 { font-size: 14px; }
+.markdown-body h2 { font-size: 13px; }
+.markdown-body h3 { font-size: 12px; }
 
 .markdown-body p {
-  margin: 4px 0;
+  margin: 0;
 }
 
 .markdown-body ul,
 .markdown-body ol {
-  padding-left: 20px;
-  margin: 4px 0;
+  padding-left: 18px;
+  margin: 0;
 }
 
 .markdown-body li {
-  margin: 2px 0;
+  margin: 0;
 }
 
 .markdown-body strong {

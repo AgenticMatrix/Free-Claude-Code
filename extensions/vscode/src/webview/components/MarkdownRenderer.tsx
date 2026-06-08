@@ -1,6 +1,7 @@
 import { h } from 'preact';
-import { useMemo, useRef, useEffect, useCallback } from 'preact/hooks';
+import { useMemo, useRef, useEffect } from 'preact/hooks';
 import { marked } from 'marked';
+import katex from 'katex';
 
 marked.setOptions({
   breaks: true,
@@ -12,12 +13,45 @@ interface MarkdownRendererProps {
   onFileClick?: (path: string) => void;
 }
 
+const MATH_PLACEHOLDERS: string[] = [];
+
+function protectMath(md: string): string {
+  MATH_PLACEHOLDERS.length = 0;
+  // Display math: $$...$$ and \[...\]
+  let result = md.replace(/\$\$([\s\S]*?)\$\$/g, storeDisplayMath);
+  result = result.replace(/\\\[([\s\S]*?)\\\]/g, storeDisplayMath);
+  // Inline math: $...$ and \(...\)
+  result = result.replace(/(?<!\$)\$(?!\$)([^$\n]+?)(?<!\$)\$(?!\$)/g, storeInlineMath);
+  result = result.replace(/\\\(([\s\S]*?)\\\)/g, storeInlineMath);
+  return result;
+}
+
+function storeDisplayMath(_m: string, formula: string): string {
+  const idx = MATH_PLACEHOLDERS.length;
+  MATH_PLACEHOLDERS.push(`<span class="katex-display">${katex.renderToString(formula.trim(), { displayMode: true, throwOnError: false })}</span>`);
+  return `\x00MATH${idx}\x00`;
+}
+
+function storeInlineMath(_m: string, formula: string): string {
+  const idx = MATH_PLACEHOLDERS.length;
+  MATH_PLACEHOLDERS.push(`<span class="katex-inline">${katex.renderToString(formula.trim(), { displayMode: false, throwOnError: false })}</span>`);
+  return `\x00MATH${idx}\x00`;
+}
+
+function restoreMath(html: string): string {
+  return html.replace(/\x00MATH(\d+)\x00/g, (_m: string, idx: string) => {
+    return MATH_PLACEHOLDERS[parseInt(idx, 10)] || '';
+  });
+}
+
 export function MarkdownRenderer({ text, onFileClick }: MarkdownRendererProps): h.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const html = useMemo(() => {
     try {
-      return marked.parse(text, { async: false }) as string;
+      const protected_text = protectMath(text);
+      const html = marked.parse(protected_text, { async: false }) as string;
+      return restoreMath(html);
     } catch {
       return text;
     }
@@ -50,8 +84,8 @@ export function MarkdownRenderer({ text, onFileClick }: MarkdownRendererProps): 
       copyBtn.className = 'code-block-copy';
       copyBtn.textContent = 'Copy';
       copyBtn.onclick = () => {
-        const text = code?.textContent || '';
-        navigator.clipboard.writeText(text).then(() => {
+        const t = code?.textContent || '';
+        navigator.clipboard.writeText(t).then(() => {
           copyBtn.textContent = 'Copied!';
           setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
         }).catch(() => {
@@ -67,40 +101,32 @@ export function MarkdownRenderer({ text, onFileClick }: MarkdownRendererProps): 
       wrapper.appendChild(pre);
     });
 
-    // ── File paths: make clickable to open in VS Code ───────
+    // ── File paths: make clickable ─────────────────────────
     const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
     const textNodes: Text[] = [];
-    while (walker.nextNode()) {
-      textNodes.push(walker.currentNode as Text);
-    }
+    while (walker.nextNode()) textNodes.push(walker.currentNode as Text);
 
     textNodes.forEach((node) => {
-      // Match common file path patterns like src/foo.ts, packages/bar/index.ts
       const filePattern = /\b[\w./-]+\.[\w]{1,6}\b/g;
       const parent = node.parentNode;
       if (!parent) return;
-      // Skip code blocks and already-processed nodes
       if (parent.nodeName === 'CODE' || parent.nodeName === 'PRE') return;
       if ((parent as HTMLElement).classList?.contains('file-link')) return;
 
-      const text = node.textContent || '';
+      const nodeText = node.textContent || '';
       const matches: Array<{ start: number; end: number; path: string }> = [];
       let match;
-      while ((match = filePattern.exec(text)) !== null) {
-        // Only match plausible file paths (containing / or \)
+      while ((match = filePattern.exec(nodeText)) !== null) {
         if (match[0].includes('/') || match[0].includes('\\')) {
           matches.push({ start: match.index, end: match.index + match[0].length, path: match[0] });
         }
       }
-
       if (matches.length === 0) return;
 
       const fragment = document.createDocumentFragment();
       let lastEnd = 0;
       matches.forEach((m) => {
-        if (m.start > lastEnd) {
-          fragment.appendChild(document.createTextNode(text.slice(lastEnd, m.start)));
-        }
+        if (m.start > lastEnd) fragment.appendChild(document.createTextNode(nodeText.slice(lastEnd, m.start)));
         const link = document.createElement('span');
         link.className = 'file-link';
         link.textContent = m.path;
@@ -113,9 +139,7 @@ export function MarkdownRenderer({ text, onFileClick }: MarkdownRendererProps): 
         fragment.appendChild(link);
         lastEnd = m.end;
       });
-      if (lastEnd < text.length) {
-        fragment.appendChild(document.createTextNode(text.slice(lastEnd)));
-      }
+      if (lastEnd < nodeText.length) fragment.appendChild(document.createTextNode(nodeText.slice(lastEnd)));
       parent.replaceChild(fragment, node);
     });
   }, [html]);
