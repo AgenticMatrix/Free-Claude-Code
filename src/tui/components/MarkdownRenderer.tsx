@@ -518,13 +518,29 @@ function BlockElement({ block }: { block: Block }) {
       const allRows = [headers, ...rows];
       const colCount = headers.length;
 
-      // Calculate column widths based on max content width per column
-      const colWidths: number[] = Array.from({ length: colCount }, (_, ci) =>
+      // Calculate natural column widths based on max content width per column
+      const naturalWidths: number[] = Array.from({ length: colCount }, (_, ci) =>
         Math.max(...allRows.map((r) => displayWidth(r[ci] || ''))),
       );
 
-      // Minimum padding: 1 space on each side
       const pad = 1;
+      const naturalInnerWidths = naturalWidths.map((w) => w + pad * 2);
+      const naturalTotal = naturalInnerWidths.reduce((a, b) => a + b, 0) + colCount + 1;
+
+      const termWidth = process.stdout.columns ?? 80;
+      const maxWidth = Math.max(40, termWidth - 2);
+
+      // Scale down if the table is wider than the terminal
+      let colWidths = naturalWidths;
+      if (naturalTotal > maxWidth) {
+        const borderOverhead = colCount * 3 + 1;
+        const available = maxWidth - borderOverhead;
+        const totalNatural = naturalWidths.reduce((a, b) => a + b, 0);
+        colWidths = naturalWidths.map((w) =>
+          Math.max(3, Math.floor((w / totalNatural) * available)),
+        );
+      }
+
       const innerWidths = colWidths.map((w) => w + pad * 2);
 
       // Border helpers
@@ -532,19 +548,60 @@ function BlockElement({ block }: { block: Block }) {
       const sepBorder = '├' + innerWidths.map((w) => '─'.repeat(w)).join('┼') + '┤';
       const botBorder = '└' + innerWidths.map((w) => '─'.repeat(w)).join('┴') + '┘';
 
-      const renderRow = (cells: string[], bold: boolean) => {
-        const padded = cells.map((cell, ci) => padToWidth(` ${cell} `, innerWidths[ci], alignments[ci] || 'left'));
-        return { line: '│' + padded.join('│') + '│', bold };
+      // Wrap cell text to fit a given display width
+      const wrapCell = (text: string, width: number): string[] => {
+        const lines: string[] = [];
+        let cur = '';
+        let curW = 0;
+        for (const ch of text) {
+          const chW = displayWidth(ch);
+          if (curW + chW > width && cur.length > 0) {
+            lines.push(cur);
+            cur = ch;
+            curW = chW;
+          } else {
+            cur += ch;
+            curW += chW;
+          }
+        }
+        if (cur.length > 0) lines.push(cur);
+        return lines.length > 0 ? lines : [''];
       };
+
+      // Render a row into an array of lines (multi-line if any cell wraps)
+      const renderRowLines = (cells: string[]): string[][] => {
+        const wrapped = cells.map((cell, ci) => wrapCell(cell, colWidths[ci]!));
+        const maxLines = Math.max(...wrapped.map((w) => w.length), 1);
+        const result: string[][] = [];
+        for (let li = 0; li < maxLines; li++) {
+          const lineCells = cells.map((_, ci) => {
+            const line = wrapped[ci]?.[li] ?? '';
+            return padToWidth(` ${line} `, innerWidths[ci]!, alignments[ci] || 'left');
+          });
+          result.push(lineCells);
+        }
+        return result;
+      };
+
+      const headerLines = renderRowLines(headers);
+      const rowLines = rows.map((row) => renderRowLines(row));
 
       return (
         <Box flexDirection="column" marginY={1}>
           <Text color="grey">{topBorder}</Text>
-          <Text bold color="white">{renderRow(headers, true).line}</Text>
-          <Text color="grey">{sepBorder}</Text>
-          {rows.map((row, ri) => (
-            <Text key={ri} color="white">{renderRow(row, false).line}</Text>
+          {headerLines.map((cells, li) => (
+            <Text key={`h${li}`} bold color="white">
+              {'│' + cells.join('│') + '│'}
+            </Text>
           ))}
+          <Text color="grey">{sepBorder}</Text>
+          {rowLines.map((lines, ri) =>
+            lines.map((cells, li) => (
+              <Text key={`${ri}-${li}`} color="white">
+                {'│' + cells.join('│') + '│'}
+              </Text>
+            )),
+          )}
           <Text color="grey">{botBorder}</Text>
         </Box>
       );
