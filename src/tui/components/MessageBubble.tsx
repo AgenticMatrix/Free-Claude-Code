@@ -105,11 +105,19 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     message.blocks.every((b) => b.type === 'tool_result');
 
   if (role === 'user' && !isToolResultOnly) {
+    const USER_FOLD = 10;
+    const contentLines = displayContent.split(/\r?\n|\r/);
+    const tooLong = contentLines.length > USER_FOLD;
+    const displayText = tooLong
+      ? contentLines.slice(0, 6).join('\n') +
+        `\n... [${contentLines.length - 6} more lines]`
+      : displayContent;
+
     return (
       <Box flexDirection="column" marginBottom={1}>
         <Text>
           <Text color="cyan" bold>You:</Text>{' '}
-          <Text color="white">{displayContent}</Text>
+          <Text color="white">{displayText}</Text>
         </Text>
       </Box>
     );
