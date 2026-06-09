@@ -321,13 +321,37 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       };
 
     case 'ADD_PASTE_BLOCK': {
-      const lineCount = action.text.split(/\r?\n|\r/).length;
+      const addLines = action.text.split(/\r?\n|\r/).length;
+      const pos = Math.max(0, Math.min(state.cursorPosition, state.inputText.length));
+      const beforeCursor = state.inputText.slice(0, pos);
+
+      // Merge with immediately preceding paste marker (chunked paste)
+      const prevMarker = beforeCursor.match(
+        /\[Pasted text #(\d+) \+(\d+) lines\]$/,
+      );
+      if (prevMarker) {
+        const prevId = Number(prevMarker[1]);
+        const prevContent = state.pasteBlocks[prevId] ?? '';
+        const mergedContent = prevContent + action.text;
+        const totalLines = Number(prevMarker[2]) + addLines;
+        const newMarker = `[Pasted text #${prevId} +${totalLines} lines]`;
+        const newText =
+          beforeCursor.slice(0, -prevMarker[0].length) +
+          newMarker +
+          state.inputText.slice(pos);
+        return {
+          ...state,
+          inputText: newText,
+          cursorPosition: pos - prevMarker[0].length + newMarker.length,
+          pasteBlocks: { ...state.pasteBlocks, [prevId]: mergedContent },
+        };
+      }
+
+      // New paste block
       let pasteId = 1;
       while (state.pasteBlocks[pasteId] !== undefined) pasteId++;
-      const marker = `[Pasted text #${pasteId} +${lineCount - 1} lines]`;
-      const pos = Math.max(0, Math.min(state.cursorPosition, state.inputText.length));
-      const newText =
-        state.inputText.slice(0, pos) + marker + state.inputText.slice(pos);
+      const marker = `[Pasted text #${pasteId} +${addLines - 1} lines]`;
+      const newText = beforeCursor + marker + state.inputText.slice(pos);
       return {
         ...state,
         inputText: newText,
