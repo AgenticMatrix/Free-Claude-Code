@@ -20,7 +20,6 @@ import type {
   StopReason,
   QueryMessage,
   CompactMetadata,
-  ToolProgress,
   DeferredPermission,
 } from './types.js';
 import { AgentError, RiskLevel } from './types.js';
@@ -32,7 +31,7 @@ import { CheckpointManager } from './checkpoint.js';
 import type { SystemPrompt } from './system-prompt.js';
 import type { HookManager } from './hooks.js';
 import { estimateTokens } from './token-budget.js';
-import { partitionToolCalls, executeConcurrentBatch } from './concurrency.js';
+import { ToolExecutionQueue } from './tool-queue.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -255,9 +254,29 @@ export async function* query(config: QueryConfig): AsyncGenerator<QueryMessage> 
 
     // === Stream call to LLM ===
     const assistantMessages: AssistantMessage[] = [];
-    const toolUseBlocks: ToolUseBlock[] = [];
     let stopReason: StopReason = 'end_turn';
     let usage: CompletionUsage = { input_tokens: 0, output_tokens: 0 };
+
+    // Streaming tool execution: tools are enqueued as soon as their
+    // input JSON is complete (content_block_stop), not after the full
+    // message.  A bounded pool limits concurrent executions.
+    interface BuildingBlock {
+      id: string;
+      name: string;
+      inputJson: string;
+    }
+    let buildingBlock: BuildingBlock | null = null;
+    const orderedBlocks: ToolUseBlock[] = [];
+    const queue = new ToolExecutionQueue(maxToolConcurrency, abortController.signal);
+    const execOpts: ExecuteSingleToolOpts = {
+      sessionId,
+      cwd,
+      toolRegistry,
+      checkpointManager,
+      sessionManager,
+      hookManager,
+      abortController,
+    };
 
     try {
       let systemText = systemPrompt.prompt;
@@ -311,17 +330,125 @@ export async function* query(config: QueryConfig): AsyncGenerator<QueryMessage> 
         tools: toolDefinitions,
         signal: abortController.signal,
       })) {
-        const isStreamEvent = 'type' in event;
-        if (
-          isStreamEvent &&
-          (event.type === 'content_block_start' ||
-          event.type === 'content_block_delta' ||
-          event.type === 'content_block_stop' ||
-          event.type === 'message_start' ||
-          event.type === 'message_delta' ||
-          event.type === 'message_stop')
-        ) {
+        // ── Stream events ──────────────────────────────────────────
+        if ('type' in event) {
+          // Always yield stream events to the TUI first
           yield { type: 'stream_event', event: event as StreamEvent };
+
+          // Track building tool_use blocks from the stream
+          if (event.type === 'content_block_start') {
+            const cb = (event as { type: 'content_block_start'; content_block: ContentBlock }).content_block;
+            if (cb.type === 'tool_use' && cb.id && cb.name) {
+              buildingBlock = { id: cb.id, name: cb.name, inputJson: '' };
+            }
+          }
+
+          if (event.type === 'content_block_delta' && buildingBlock) {
+            const delta = (event as { type: 'content_block_delta'; delta: { type: string; partial_json?: string } }).delta;
+            if (delta.type === 'input_json_delta' && delta.partial_json) {
+              buildingBlock.inputJson += delta.partial_json;
+            }
+          }
+
+          if (event.type === 'content_block_stop' && buildingBlock) {
+            // Tool block input is complete — parse, check permission, enqueue
+            const toolBlock: ToolUseBlock = {
+              type: 'tool_use',
+              id: buildingBlock.id,
+              name: buildingBlock.name,
+              input: (() => {
+                try { return JSON.parse(buildingBlock.inputJson) as Record<string, unknown>; }
+                catch { return {}; }
+              })(),
+            };
+            orderedBlocks.push(toolBlock);
+
+            // Permission check + enqueue (may yield for ASK mode)
+            if (!abortController.signal.aborted) {
+              const toolDef = toolRegistry.get(toolBlock.name)?.definition;
+              let permissionResult = await permissionEngine.check(
+                {
+                  toolName: toolBlock.name,
+                  input: toolBlock.input,
+                  riskLevel: (toolDef?.riskLevel ?? RiskLevel.MUTATION) as RiskLevel,
+                },
+                toolDef,
+              );
+
+              // PermissionRequest hook
+              if (hookManager && permissionResult.behavior !== 'approve') {
+                const riskLevelStr = toolDef?.riskLevel ?? RiskLevel.MUTATION;
+                const { permissionOverride } = await hookManager.onPermissionRequest(
+                  sessionId, cwd, toolBlock.name, toolBlock.input,
+                  String(riskLevelStr), permissionResult.behavior,
+                );
+                if (permissionOverride === 'auto-approve') {
+                  permissionResult.allowed = true;
+                  permissionResult.behavior = 'approve';
+                } else if (permissionOverride === 'auto-deny') {
+                  permissionResult.allowed = false;
+                  permissionResult.behavior = 'deny';
+                  permissionResult.reason = 'Auto-denied by PermissionRequest hook';
+                }
+              }
+
+              // deny
+              if (!permissionResult.allowed && permissionResult.behavior === 'deny') {
+                const reason = permissionResult.reason ?? 'Denied';
+                queue.storeError(toolBlock, reason);
+                hookManager?.onPermissionDenied(
+                  sessionId, cwd, toolBlock.name, toolBlock.input, reason,
+                ).catch(() => {});
+              } else if (permissionResult.behavior === 'ask_user') {
+                // ASK — yield permission_required, await user response
+                const toolInput = toolBlock.input as Record<string, unknown>;
+                const command = [toolBlock.name, ...Object.entries(toolInput ?? {}).map(([k, v]) => `${k}=${String(v)}`)].join(' ');
+                const description =
+                  permissionResult.prompt ??
+                  toolDef?.description ??
+                  `Execute ${toolBlock.name}`;
+
+                yield {
+                  type: 'system', subtype: 'progress',
+                  data: {
+                    toolName: toolBlock.name, toolUseId: toolBlock.id,
+                    status: 'started', message: 'Waiting for approval...',
+                  },
+                };
+
+                let resolve!: (allowed: boolean) => void;
+                const promise = new Promise<boolean>((res) => { resolve = res; });
+                const deferred: DeferredPermission = {
+                  toolName: toolBlock.name, command, description,
+                  toolUseId: toolBlock.id, resolve, promise,
+                };
+                yield { type: 'system', subtype: 'permission_required', deferred };
+
+                const allowed = await new Promise<boolean>((res) => {
+                  promise.then((v) => res(v));
+                  const onAbort = () => { res(false); };
+                  abortController.signal.addEventListener('abort', onAbort, { once: true });
+                });
+
+                if (!allowed) {
+                  queue.storeError(toolBlock, 'User denied permission');
+                  hookManager?.onPermissionDenied(
+                    sessionId, cwd, toolBlock.name, toolBlock.input,
+                    'User denied permission',
+                  ).catch(() => {});
+                } else {
+                  queue.enqueue(toolBlock, (b) => executeSingleTool(b, execOpts));
+                }
+              } else {
+                // approve — enqueue immediately
+                queue.enqueue(toolBlock, (b) => executeSingleTool(b, execOpts));
+              }
+            } else {
+              queue.storeError(toolBlock, 'Interrupted by user');
+            }
+
+            buildingBlock = null;
+          }
 
           if (event.type === 'message_stop') {
             const msg = (event as unknown as { type: 'message_stop'; message: AssistantMessage }).message;
@@ -329,14 +456,6 @@ export async function* query(config: QueryConfig): AsyncGenerator<QueryMessage> 
               assistantMessages.push(msg);
               stopReason = msg.stopReason;
               usage = msg.usage;
-
-              if (Array.isArray(msg.content)) {
-                for (const block of msg.content) {
-                  if (block.type === 'tool_use') {
-                    toolUseBlocks.push(block as ToolUseBlock);
-                  }
-                }
-              }
             }
           }
 
@@ -346,8 +465,8 @@ export async function* query(config: QueryConfig): AsyncGenerator<QueryMessage> 
           }
         }
 
-        // Handle AssistantMessage yielded directly from the callModel generator
-        if (!isStreamEvent && 'role' in event && (event as AssistantMessage).role === 'assistant') {
+        // ── Direct AssistantMessage (non-streaming fallback) ──────
+        if (!('type' in event) && 'role' in event && (event as AssistantMessage).role === 'assistant') {
           const msg = event as AssistantMessage;
           assistantMessages.push(msg);
           stopReason = msg.stopReason ?? stopReason;
@@ -356,15 +475,89 @@ export async function* query(config: QueryConfig): AsyncGenerator<QueryMessage> 
           if (Array.isArray(msg.content)) {
             for (const block of msg.content) {
               if (block.type === 'tool_use') {
-                toolUseBlocks.push(block as ToolUseBlock);
+                const toolBlock = block as ToolUseBlock;
+                orderedBlocks.push(toolBlock);
+
+                // Permission check + enqueue (same logic as streaming path above)
+                if (!abortController.signal.aborted) {
+                  const toolDef = toolRegistry.get(toolBlock.name)?.definition;
+                  let permissionResult = await permissionEngine.check(
+                    {
+                      toolName: toolBlock.name,
+                      input: toolBlock.input,
+                      riskLevel: (toolDef?.riskLevel ?? RiskLevel.MUTATION) as RiskLevel,
+                    },
+                    toolDef,
+                  );
+
+                  if (hookManager && permissionResult.behavior !== 'approve') {
+                    const riskLevelStr = toolDef?.riskLevel ?? RiskLevel.MUTATION;
+                    const { permissionOverride } = await hookManager.onPermissionRequest(
+                      sessionId, cwd, toolBlock.name, toolBlock.input,
+                      String(riskLevelStr), permissionResult.behavior,
+                    );
+                    if (permissionOverride === 'auto-approve') {
+                      permissionResult.allowed = true;
+                      permissionResult.behavior = 'approve';
+                    } else if (permissionOverride === 'auto-deny') {
+                      permissionResult.allowed = false;
+                      permissionResult.behavior = 'deny';
+                      permissionResult.reason = 'Auto-denied by PermissionRequest hook';
+                    }
+                  }
+
+                  if (!permissionResult.allowed && permissionResult.behavior === 'deny') {
+                    const reason = permissionResult.reason ?? 'Denied';
+                    queue.storeError(toolBlock, reason);
+                    hookManager?.onPermissionDenied(
+                      sessionId, cwd, toolBlock.name, toolBlock.input, reason,
+                    ).catch(() => {});
+                  } else if (permissionResult.behavior === 'ask_user') {
+                    const toolInput = toolBlock.input as Record<string, unknown>;
+                    const command = [toolBlock.name, ...Object.entries(toolInput ?? {}).map(([k, v]) => `${k}=${String(v)}`)].join(' ');
+                    const description =
+                      permissionResult.prompt ??
+                      toolDef?.description ??
+                      `Execute ${toolBlock.name}`;
+
+                    yield { type: 'system', subtype: 'progress', data: { toolName: toolBlock.name, toolUseId: toolBlock.id, status: 'started', message: 'Waiting for approval...' } };
+
+                    let resolve!: (allowed: boolean) => void;
+                    const promise = new Promise<boolean>((res) => { resolve = res; });
+                    const deferred: DeferredPermission = { toolName: toolBlock.name, command, description, toolUseId: toolBlock.id, resolve, promise };
+                    yield { type: 'system', subtype: 'permission_required', deferred };
+
+                    const allowed = await new Promise<boolean>((res) => {
+                      promise.then((v) => res(v));
+                      const onAbort = () => { res(false); };
+                      abortController.signal.addEventListener('abort', onAbort, { once: true });
+                    });
+
+                    if (!allowed) {
+                      queue.storeError(toolBlock, 'User denied permission');
+                      hookManager?.onPermissionDenied(sessionId, cwd, toolBlock.name, toolBlock.input, 'User denied permission').catch(() => {});
+                    } else {
+                      queue.enqueue(toolBlock, (b) => executeSingleTool(b, execOpts));
+                    }
+                  } else {
+                    queue.enqueue(toolBlock, (b) => executeSingleTool(b, execOpts));
+                  }
+                } else {
+                  queue.storeError(toolBlock, 'Interrupted by user');
+                }
               }
             }
           }
         }
+
+        // Drain progress events after each event so TUI timers start promptly
+        for (const pe of queue.drainProgress()) {
+          yield { type: 'system', subtype: 'progress', data: pe };
+        }
       }
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error);
-      for (const block of toolUseBlocks) {
+      for (const block of orderedBlocks) {
         const errorMsg = createUserMessage([createToolErrorResult(block.id, errMsg)]);
         messages.push(errorMsg);
         yield { type: 'user', message: errorMsg };
@@ -435,271 +628,27 @@ export async function* query(config: QueryConfig): AsyncGenerator<QueryMessage> 
     }
 
     // === stop_reason is not tool_use → done ===
-    if (stopReason !== 'tool_use' || toolUseBlocks.length === 0) {
+    if (stopReason !== 'tool_use' || orderedBlocks.length === 0) {
       return;
     }
 
-    // === Execute tools ===
-    const toolResults: ToolResultBlock[] = [];
+    // === Wait for all queued tools to settle ===
+    await queue.waitForAll();
 
-    // Phase A: Permission checks (sequential — ask_user requires yielding)
-    const approvedTools: ToolUseBlock[] = [];
-
-    for (const toolBlock of toolUseBlocks) {
-      if (abortController.signal.aborted) {
-        toolResults.push(createToolErrorResult(toolBlock.id, 'Interrupted by user'));
-        continue;
-      }
-
-      // Permission check
-      const toolDef = toolRegistry.get(toolBlock.name)?.definition;
-      let permissionResult = await permissionEngine.check(
-        {
-          toolName: toolBlock.name,
-          input: toolBlock.input,
-          riskLevel: (toolDef?.riskLevel ?? RiskLevel.MUTATION) as RiskLevel,
-        },
-        toolDef,
-      );
-
-      // === PermissionRequest hook (blockable — can override permission) ===
-      if (hookManager && permissionResult.behavior !== 'approve') {
-        const riskLevelStr = toolDef?.riskLevel ?? RiskLevel.MUTATION;
-        const { permissionOverride } = await hookManager.onPermissionRequest(
-          sessionId,
-          cwd,
-          toolBlock.name,
-          toolBlock.input,
-          String(riskLevelStr),
-          permissionResult.behavior,
-        );
-        if (permissionOverride === 'auto-approve') {
-          permissionResult.allowed = true;
-          permissionResult.behavior = 'approve';
-        } else if (permissionOverride === 'auto-deny') {
-          permissionResult.allowed = false;
-          permissionResult.behavior = 'deny';
-          permissionResult.reason = 'Auto-denied by PermissionRequest hook';
-        }
-      }
-
-      // ── Branch: deny ──────────────────────────────────────────
-      if (!permissionResult.allowed && permissionResult.behavior === 'deny') {
-        toolResults.push(createToolErrorResult(toolBlock.id, permissionResult.reason ?? 'Denied'));
-        hookManager?.onPermissionDenied(
-          sessionId, cwd, toolBlock.name, toolBlock.input,
-          permissionResult.reason ?? 'Permission denied',
-        ).catch(() => {});
-        continue;
-      }
-
-      // ── Branch: ask_user (Deferred permission) ────────────────
-      if (permissionResult.behavior === 'ask_user') {
-        const toolInput = toolBlock.input as Record<string, unknown>;
-        const command = [toolBlock.name, ...Object.entries(toolInput ?? {}).map(([k, v]) => `${k}=${String(v)}`)].join(' ');
-        const description =
-          permissionResult.prompt ??
-          toolDef?.description ??
-          `Execute ${toolBlock.name}`;
-
-        yield {
-          type: 'system',
-          subtype: 'progress',
-          data: {
-            toolName: toolBlock.name,
-            toolUseId: toolBlock.id,
-            status: 'started' as const,
-            message: 'Waiting for approval...',
-          },
-        };
-
-        let resolve!: (allowed: boolean) => void;
-        const promise = new Promise<boolean>((res) => { resolve = res; });
-
-        const deferred: DeferredPermission = {
-          toolName: toolBlock.name,
-          command,
-          description,
-          toolUseId: toolBlock.id,
-          resolve,
-          promise,
-        };
-
-        yield { type: 'system', subtype: 'permission_required', deferred };
-
-        const allowed = await new Promise<boolean>((resolve) => {
-          promise.then((v) => resolve(v));
-          const onAbort = () => { resolve(false); };
-          abortController.signal.addEventListener('abort', onAbort, { once: true });
-        });
-        if (!allowed) {
-          toolResults.push(createToolErrorResult(toolBlock.id, 'User denied permission'));
-          hookManager?.onPermissionDenied(
-            sessionId, cwd, toolBlock.name, toolBlock.input,
-            'User denied permission',
-          ).catch(() => {});
-
-          const progressDenied: ToolProgress = { toolName: toolBlock.name, toolUseId: toolBlock.id, status: 'completed' };
-          yield { type: 'system', subtype: 'progress', data: progressDenied };
-          continue;
-        }
-      }
-
-      approvedTools.push(toolBlock);
+    // Drain final progress events
+    for (const pe of queue.drainProgress()) {
+      yield { type: 'system', subtype: 'progress', data: pe };
     }
 
-    // Phase B: Partition approved tools into batches
-    const batches = partitionToolCalls(approvedTools, toolRegistry);
-
-    // Phase C: Execute each batch (parallel within batch, sequential across)
-    const execOpts: ExecuteSingleToolOpts = {
-      sessionId,
-      cwd,
-      toolRegistry,
-      checkpointManager,
-      sessionManager,
-      hookManager,
-      abortController,
-    };
-
-    for (const batch of batches) {
-      if (batch.length === 1) {
-        // Sequential path — yield running before awaiting so the TUI timer starts
-        const toolBlock = batch[0]!;
-        const toolDef = toolRegistry.get(toolBlock.name)?.definition;
-
-        // PreToolUse hook (must finish before we yield running)
-        if (hookManager) {
-          const { blocked, reason } = await hookManager.onPreToolUse(
-            sessionId, cwd, toolBlock.name, toolBlock.input,
-          );
-          if (blocked) {
-            const msg = reason ?? 'Blocked by PreToolUse hook';
-            toolResults.push(createToolErrorResult(toolBlock.id, msg));
-            yield {
-              type: 'system', subtype: 'progress',
-              data: { toolName: toolBlock.name, toolUseId: toolBlock.id, status: 'completed', message: `Blocked: ${msg}` },
-            };
-            continue;
-          }
-        }
-
-        // Git checkpoint before destructive operations
-        if (toolDef?.riskLevel === 'destructive') {
-          await checkpointManager.create({ sessionId, cwd, description: `Pre-${toolBlock.name}` });
-        }
-
-        // Yield running NOW so the TUI shows the timer
-        yield {
-          type: 'system', subtype: 'progress',
-          data: { toolName: toolBlock.name, toolUseId: toolBlock.id, status: 'running' },
-        };
-
-        const toolCtx: ToolContext = { sessionId, cwd, signal: abortController.signal };
-        const toolStartTime = Date.now();
-
-        try {
-          const execResult = await toolRegistry.execute(toolBlock.name, toolBlock.input, toolCtx);
-          const resultBlock: ToolResultBlock = {
-            type: 'tool_result',
-            tool_use_id: toolBlock.id,
-            content: execResult.content,
-            is_error: execResult.isError,
-            duration: execResult.duration,
-            metadata: execResult.metadata,
-          };
-          toolResults.push(resultBlock);
-          sessionManager.trackTool(toolBlock.name);
-
-          if ((toolBlock.name === 'Write' || toolBlock.name === 'Edit') && toolBlock.input) {
-            const input = toolBlock.input as Record<string, unknown>;
-            if (typeof input.file_path === 'string') {
-              sessionManager.trackModifiedFile(input.file_path);
-            }
-          }
-
-          yield {
-            type: 'system', subtype: 'progress',
-            data: {
-              toolName: toolBlock.name, toolUseId: toolBlock.id, status: 'completed',
-              is_error: resultBlock.is_error,
-              message: resultBlock.is_error
-                ? `Error: ${String(resultBlock.content)}`
-                : String(resultBlock.content).slice(0, 500),
-            },
-          };
-
-          hookManager?.onNotification(
-            sessionId, cwd,
-            resultBlock.is_error ? 'warn' : 'info',
-            `Tool ${toolBlock.name} ${resultBlock.is_error ? 'failed' : 'completed'}`,
-            { toolName: toolBlock.name, isError: resultBlock.is_error, toolUseId: toolBlock.id },
-          ).catch(() => {});
-
-          if (hookManager) {
-            const durationMs = Date.now() - toolStartTime;
-            hookManager.onPostToolUse(
-              sessionId, cwd, toolBlock.name, toolBlock.input,
-              { output: execResult.content, success: !resultBlock.is_error },
-              !resultBlock.is_error, durationMs,
-            ).catch(() => {});
-          }
-        } catch (error: unknown) {
-          const errMsg = error instanceof Error ? error.message : String(error);
-          toolResults.push(createToolErrorResult(toolBlock.id, errMsg));
-
-          if (hookManager) {
-            const errObj = error instanceof Error ? error : new Error(errMsg);
-            hookManager.onPostToolUseFailure(
-              sessionId, cwd, toolBlock.name, toolBlock.input, errObj,
-            ).catch(() => {});
-          }
-
-          yield {
-            type: 'system', subtype: 'progress',
-            data: { toolName: toolBlock.name, toolUseId: toolBlock.id, status: 'completed', is_error: true, message: `Error: ${errMsg}` },
-          };
-
-          if (hookManager) {
-            const durationMs = Date.now() - toolStartTime;
-            hookManager.onPostToolUse(
-              sessionId, cwd, toolBlock.name, toolBlock.input,
-              { output: errMsg, success: false }, false, durationMs,
-            ).catch(() => {});
-          }
-        }
-      } else {
-        // Concurrent path — yield running for all tools immediately
-        // so TUI timers start before we await the batch
-        for (const block of batch) {
-          yield {
-            type: 'system', subtype: 'progress',
-            data: { toolName: block.name, toolUseId: block.id, status: 'running' },
-          };
-        }
-
-        const progressQueue: ToolProgress[] = [];
-        const batchResults = await executeConcurrentBatch(
-          batch,
-          maxToolConcurrency,
-          (block) => executeSingleTool(block, execOpts),
-          abortController.signal,
-          (pe) => {
-            // Only queue completed events (running already yielded)
-            if (pe.status !== 'running') progressQueue.push(pe);
-          },
-        );
-        toolResults.push(...batchResults);
-        for (const pe of progressQueue) {
-          yield { type: 'system', subtype: 'progress', data: pe };
-        }
-      }
-    }
+    // Assemble results in original parse order
+    const toolResults: ToolResultBlock[] = orderedBlocks.map((block) =>
+      queue.getResult(block.id) ?? createToolErrorResult(block.id, 'Tool execution skipped'),
+    );
 
     // === PostToolBatch hook (non-blockable) ===
     if (hookManager && toolResults.length > 0) {
       const batchResults = toolResults.map((tr, i) => {
-        const toolBlock = toolUseBlocks[i];
+        const toolBlock = orderedBlocks[i];
         return {
           toolName: toolBlock?.name ?? 'unknown',
           success: !tr.is_error,
