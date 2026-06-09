@@ -21,5 +21,5 @@ export const schema: ToolSchema = {
     },
     required: ['file_path'],
   },
-  _meta: { riskLevel: 'safe' },
+  _meta: { riskLevel: 'safe', isConcurrencySafe: true },
 };

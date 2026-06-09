@@ -18,5 +18,5 @@ export const schema: ToolSchema = {
     },
     required: ['url', 'prompt'],
   },
-  _meta: { riskLevel: 'safe' },
+  _meta: { riskLevel: 'safe', isConcurrencySafe: true },
 };

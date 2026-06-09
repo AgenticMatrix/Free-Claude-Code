@@ -17,5 +17,5 @@ export const schema: ToolSchema = {
     },
     required: ['pattern'],
   },
-  _meta: { riskLevel: 'safe' },
+  _meta: { riskLevel: 'safe', isConcurrencySafe: true },
 };

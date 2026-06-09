@@ -18,7 +18,7 @@
 import { render } from 'ink';
 
 import { App } from '../tui/components/App.js';
-import { loadConfig } from './config.js';
+import { loadConfig, loadSettings, getMaxToolConcurrency } from './config.js';
 import { createClient } from '../api/client.js';
 import { createCallModelFromClient } from '../core/provider-adapter.js';
 import { ToolRegistry } from '../core/tool-registry.js';
@@ -91,7 +91,7 @@ function buildToolRegistry(): ToolRegistry {
 
   for (const plugin of plugins) {
     const inputSchema = (plugin.schema as unknown as Record<string, unknown>).input_schema as Record<string, unknown>;
-    const meta = (plugin.schema as unknown as Record<string, unknown>)._meta as { riskLevel?: string } | undefined;
+    const meta = (plugin.schema as unknown as Record<string, unknown>)._meta as { riskLevel?: string; isConcurrencySafe?: boolean } | undefined;
 
     const riskLevelStr = meta?.riskLevel as string | undefined;
     const riskLevel: RiskLevel | undefined =
@@ -105,6 +105,7 @@ function buildToolRegistry(): ToolRegistry {
       description: plugin.schema.description ?? plugin.name,
       input_schema: inputSchema,
       riskLevel,
+      isConcurrencySafe: meta?.isConcurrencySafe ?? false,
     };
 
     registry.register(definition, async (
@@ -149,12 +150,15 @@ async function runPrintMode(queryText: string): Promise<void> {
   const sessionManager = new SessionManager();
   sessionManager.create({ cwd: process.cwd(), model: config.model });
 
+  const settings = loadSettings();
+
   const engine = new QueryEngine({
     cwd: process.cwd(),
     toolRegistry,
     sessionManager,
     callModel,
     model: config.model,
+    maxToolConcurrency: getMaxToolConcurrency(settings),
   });
 
   await engine.init();
@@ -299,12 +303,15 @@ Examples:
   const sessionManager = new SessionManager();
   sessionManager.create({ cwd: process.cwd(), model: config.model });
 
+  const settings = loadSettings();
+
   const engine = new QueryEngine({
     cwd: process.cwd(),
     toolRegistry,
     sessionManager,
     callModel,
     model: config.model,
+    maxToolConcurrency: getMaxToolConcurrency(settings),
   });
 
   await engine.init();

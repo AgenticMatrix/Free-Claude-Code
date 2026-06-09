@@ -14,5 +14,5 @@ export const schema: ToolSchema = {
     },
     required: ['query'],
   },
-  _meta: { riskLevel: 'safe' },
+  _meta: { riskLevel: 'safe', isConcurrencySafe: true },
 };

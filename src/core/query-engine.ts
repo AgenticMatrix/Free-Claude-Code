@@ -40,6 +40,8 @@ export interface QueryEngineConfig {
   customSystemPrompt?: string;
   appendSystemPrompt?: string;
   model?: string;
+  /** Max concurrent tool executions (default: 32). */
+  maxToolConcurrency?: number;
   callModel: (params: CallModelParams) => AsyncGenerator<StreamEvent | AssistantMessage>;
   /** Optional HookManager for lifecycle hook execution */
   hookManager?: HookManager;
@@ -199,6 +201,7 @@ export class QueryEngine {
       maxBudgetUsd: this.config.maxBudgetUsd,
       contextBudget: this.config.contextBudget!,
       compactThreshold: this.config.compactThreshold!,
+      maxToolConcurrency: this.config.maxToolConcurrency,
       callModel: this.config.callModel,
       hookManager: this.config.hookManager,
     };

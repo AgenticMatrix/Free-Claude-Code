@@ -32,6 +32,7 @@ import { CheckpointManager } from './checkpoint.js';
 import type { SystemPrompt } from './system-prompt.js';
 import type { HookManager } from './hooks.js';
 import { estimateTokens } from './token-budget.js';
+import { partitionToolCalls, executeConcurrentBatch } from './concurrency.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -51,6 +52,8 @@ export interface QueryConfig {
   maxBudgetUsd?: number;
   contextBudget: number;
   compactThreshold: number;
+  /** Max concurrent tool executions (default: 32). */
+  maxToolConcurrency?: number;
   callModel: (params: CallModelParams) => AsyncGenerator<StreamEvent | AssistantMessage>;
   /** Optional HookManager for lifecycle hook execution */
   hookManager?: HookManager;
@@ -81,6 +84,148 @@ function createToolErrorResult(toolUseId: string, error: string): ToolResultBloc
 }
 
 // ---------------------------------------------------------------------------
+// executeSingleTool — run one tool with hooks, checkpoint, tracking
+// ---------------------------------------------------------------------------
+
+interface ExecuteSingleToolOpts {
+  sessionId: string;
+  cwd: string;
+  toolRegistry: ToolRegistry;
+  checkpointManager: CheckpointManager;
+  sessionManager: SessionManager;
+  hookManager?: HookManager;
+  abortController: AbortController;
+}
+
+async function executeSingleTool(
+  toolBlock: ToolUseBlock,
+  opts: ExecuteSingleToolOpts,
+): Promise<{ result: ToolResultBlock; progressEvents: ToolProgress[] }> {
+  const { sessionId, cwd, toolRegistry, checkpointManager, sessionManager, hookManager, abortController } = opts;
+  const progressEvents: ToolProgress[] = [];
+  const toolDef = toolRegistry.get(toolBlock.name)?.definition;
+
+  // PreToolUse hook
+  if (hookManager) {
+    const { blocked, reason } = await hookManager.onPreToolUse(
+      sessionId,
+      cwd,
+      toolBlock.name,
+      toolBlock.input,
+    );
+    if (blocked) {
+      const msg = reason ?? 'Blocked by PreToolUse hook';
+      progressEvents.push({
+        toolName: toolBlock.name,
+        toolUseId: toolBlock.id,
+        status: 'completed',
+        message: `Blocked: ${msg}`,
+      });
+      return { result: createToolErrorResult(toolBlock.id, msg), progressEvents };
+    }
+  }
+
+  // Git checkpoint before destructive operations
+  if (toolDef?.riskLevel === 'destructive') {
+    await checkpointManager.create({ sessionId, cwd, description: `Pre-${toolBlock.name}` });
+  }
+
+  const toolCtx: ToolContext = { sessionId, cwd, signal: abortController.signal };
+
+  progressEvents.push({
+    toolName: toolBlock.name,
+    toolUseId: toolBlock.id,
+    status: 'running',
+  });
+
+  const toolStartTime = Date.now();
+
+  try {
+    const execResult = await toolRegistry.execute(toolBlock.name, toolBlock.input, toolCtx);
+    const resultBlock: ToolResultBlock = {
+      type: 'tool_result',
+      tool_use_id: toolBlock.id,
+      content: execResult.content,
+      is_error: execResult.isError,
+      duration: execResult.duration,
+      metadata: execResult.metadata,
+    };
+    sessionManager.trackTool(toolBlock.name);
+
+    if ((toolBlock.name === 'Write' || toolBlock.name === 'Edit') && toolBlock.input) {
+      const input = toolBlock.input as Record<string, unknown>;
+      if (typeof input.file_path === 'string') {
+        sessionManager.trackModifiedFile(input.file_path);
+      }
+    }
+
+    progressEvents.push({
+      toolName: toolBlock.name,
+      toolUseId: toolBlock.id,
+      status: 'completed',
+      is_error: resultBlock.is_error,
+      message: resultBlock.is_error
+        ? `Error: ${String(resultBlock.content)}`
+        : String(resultBlock.content).slice(0, 500),
+    });
+
+    hookManager?.onNotification(
+      sessionId,
+      cwd,
+      resultBlock.is_error ? 'warn' : 'info',
+      `Tool ${toolBlock.name} ${resultBlock.is_error ? 'failed' : 'completed'}`,
+      { toolName: toolBlock.name, isError: resultBlock.is_error, toolUseId: toolBlock.id },
+    ).catch(() => {});
+
+    if (hookManager) {
+      const durationMs = Date.now() - toolStartTime;
+      hookManager
+        .onPostToolUse(
+          sessionId, cwd, toolBlock.name, toolBlock.input,
+          { output: execResult.content, success: !resultBlock.is_error },
+          !resultBlock.is_error,
+          durationMs,
+        )
+        .catch(() => {});
+    }
+
+    return { result: resultBlock, progressEvents };
+  } catch (error: unknown) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    const resultBlock = createToolErrorResult(toolBlock.id, errMsg);
+
+    if (hookManager) {
+      const errObj = error instanceof Error ? error : new Error(errMsg);
+      hookManager.onPostToolUseFailure(
+        sessionId, cwd, toolBlock.name, toolBlock.input, errObj,
+      ).catch(() => {});
+    }
+
+    progressEvents.push({
+      toolName: toolBlock.name,
+      toolUseId: toolBlock.id,
+      status: 'completed',
+      is_error: true,
+      message: `Error: ${errMsg}`,
+    });
+
+    if (hookManager) {
+      const durationMs = Date.now() - toolStartTime;
+      hookManager
+        .onPostToolUse(
+          sessionId, cwd, toolBlock.name, toolBlock.input,
+          { output: errMsg, success: false },
+          false,
+          durationMs,
+        )
+        .catch(() => {});
+    }
+
+    return { result: resultBlock, progressEvents };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // query() — Main Agent Loop
 // ---------------------------------------------------------------------------
 
@@ -97,6 +242,7 @@ export async function* query(config: QueryConfig): AsyncGenerator<QueryMessage> 
     maxBudgetUsd,
     contextBudget,
     compactThreshold,
+    maxToolConcurrency = 32,
     callModel,
     hookManager,
   } = config;
@@ -336,6 +482,9 @@ export async function* query(config: QueryConfig): AsyncGenerator<QueryMessage> 
     // === Execute tools ===
     const toolResults: ToolResultBlock[] = [];
 
+    // Phase A: Permission checks (sequential — ask_user requires yielding)
+    const approvedTools: ToolUseBlock[] = [];
+
     for (const toolBlock of toolUseBlocks) {
       if (abortController.signal.aborted) {
         toolResults.push(createToolErrorResult(toolBlock.id, 'Interrupted by user'));
@@ -393,7 +542,6 @@ export async function* query(config: QueryConfig): AsyncGenerator<QueryMessage> 
           toolDef?.description ??
           `Execute ${toolBlock.name}`;
 
-        // Show waiting state — timer should not start yet
         yield {
           type: 'system',
           subtype: 'progress',
@@ -437,128 +585,44 @@ export async function* query(config: QueryConfig): AsyncGenerator<QueryMessage> 
         }
       }
 
-      // === PreToolUse hook ===
-      if (hookManager) {
-        const { blocked, reason } = await hookManager.onPreToolUse(
-          sessionId,
-          cwd,
-          toolBlock.name,
-          toolBlock.input,
+      approvedTools.push(toolBlock);
+    }
+
+    // Phase B: Partition approved tools into batches
+    const batches = partitionToolCalls(approvedTools, toolRegistry);
+
+    // Phase C: Execute each batch (parallel within batch, sequential across)
+    const execOpts: ExecuteSingleToolOpts = {
+      sessionId,
+      cwd,
+      toolRegistry,
+      checkpointManager,
+      sessionManager,
+      hookManager,
+      abortController,
+    };
+
+    for (const batch of batches) {
+      if (batch.length === 1) {
+        // Sequential path — single tool or non-safe barrier
+        const { result, progressEvents } = await executeSingleTool(batch[0]!, execOpts);
+        toolResults.push(result);
+        for (const pe of progressEvents) {
+          yield { type: 'system', subtype: 'progress', data: pe };
+        }
+      } else {
+        // Concurrent path — safe tools run in parallel
+        const wrapped = async (block: ToolUseBlock) => executeSingleTool(block, execOpts);
+        const { results: batchResults, allProgress } = await executeConcurrentBatch(
+          batch,
+          maxToolConcurrency,
+          wrapped,
+          abortController.signal,
         );
-        if (blocked) {
-          toolResults.push(
-            createToolErrorResult(
-              toolBlock.id,
-              reason ?? 'Blocked by PreToolUse hook',
-            ),
-          );
-          const progressBlocked: ToolProgress = {
-            toolName: toolBlock.name,
-            toolUseId: toolBlock.id,
-            status: 'completed',
-            message: `Blocked: ${reason ?? 'PreToolUse hook'}`,
-          };
-          yield { type: 'system', subtype: 'progress', data: progressBlocked };
-          continue;
+        toolResults.push(...batchResults);
+        for (const pe of allProgress) {
+          yield { type: 'system', subtype: 'progress', data: pe };
         }
-      }
-
-      // Git checkpoint before destructive operations
-      if (toolDef?.riskLevel === 'destructive') {
-        await checkpointManager.create({ sessionId, cwd, description: `Pre-${toolBlock.name}` });
-      }
-
-      const toolCtx: ToolContext = { sessionId, cwd, signal: abortController.signal };
-
-      const progressRunning: ToolProgress = { toolName: toolBlock.name, toolUseId: toolBlock.id, status: 'running' };
-      yield { type: 'system', subtype: 'progress', data: progressRunning };
-
-      const toolStartTime = Date.now();
-
-      try {
-        const result = await toolRegistry.execute(toolBlock.name, toolBlock.input, toolCtx);
-        const resultBlock: ToolResultBlock = {
-          type: 'tool_result',
-          tool_use_id: toolBlock.id,
-          content: result.content,
-          is_error: result.isError,
-          duration: result.duration,
-          metadata: result.metadata,
-        };
-        toolResults.push(resultBlock);
-        sessionManager.trackTool(toolBlock.name);
-
-        if ((toolBlock.name === 'Write' || toolBlock.name === 'Edit') && toolBlock.input) {
-          const input = toolBlock.input as Record<string, unknown>;
-          if (typeof input.file_path === 'string') {
-            sessionManager.trackModifiedFile(input.file_path);
-          }
-        }
-
-        const progressDone: ToolProgress = {
-          toolName: toolBlock.name,
-          toolUseId: toolBlock.id,
-          status: 'completed',
-          is_error: resultBlock.is_error,
-          message: resultBlock.is_error
-            ? `Error: ${String(resultBlock.content)}`
-            : String(resultBlock.content).slice(0, 500),
-        };
-        yield { type: 'system', subtype: 'progress', data: progressDone };
-
-        hookManager?.onNotification(
-          sessionId,
-          cwd,
-          resultBlock.is_error ? 'warn' : 'info',
-          `Tool ${toolBlock.name} ${resultBlock.is_error ? 'failed' : 'completed'}`,
-          {
-            toolName: toolBlock.name,
-            isError: resultBlock.is_error,
-            toolUseId: toolBlock.id,
-          },
-        ).catch(() => {});
-      } catch (error: unknown) {
-        const errMsg = error instanceof Error ? error.message : String(error);
-        toolResults.push(createToolErrorResult(toolBlock.id, errMsg));
-
-        if (hookManager) {
-          const errObj = error instanceof Error ? error : new Error(errMsg);
-          hookManager.onPostToolUseFailure(
-            sessionId,
-            cwd,
-            toolBlock.name,
-            toolBlock.input,
-            errObj,
-          ).catch(() => {});
-        }
-
-        const progressDone: ToolProgress = {
-          toolName: toolBlock.name,
-          toolUseId: toolBlock.id,
-          status: 'completed',
-          is_error: true,
-          message: `Error: ${errMsg}`,
-        };
-        yield { type: 'system', subtype: 'progress', data: progressDone };
-      }
-
-      // === PostToolUse hook ===
-      if (hookManager) {
-        const durationMs = Date.now() - toolStartTime;
-        const lastResult = toolResults[toolResults.length - 1];
-        const success = lastResult ? !lastResult.is_error : true;
-        const output = lastResult?.content ?? '';
-        hookManager
-          .onPostToolUse(
-            sessionId,
-            cwd,
-            toolBlock.name,
-            toolBlock.input,
-            { output, success },
-            success,
-            durationMs,
-          )
-          .catch(() => {});
       }
     }
 

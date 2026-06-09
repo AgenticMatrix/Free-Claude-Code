@@ -32,6 +32,8 @@ export interface CoderSettings {
   max_tokens?: number;
   /** UI theme (dark / light) */
   theme?: string;
+  /** Max concurrent tool executions (default: 32, range: 1-256). */
+  max_tool_concurrency?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -45,13 +47,20 @@ export function inferProvider(model: string): string {
   return 'anthropic';
 }
 
-function loadSettings(): CoderSettings {
+export function loadSettings(): CoderSettings {
   try {
     const raw = readFileSync(join(homedir(), '.coder', 'settings.json'), 'utf-8');
     return JSON.parse(raw) as CoderSettings;
   } catch {
     return {};
   }
+}
+
+/** Resolve max tool concurrency from settings, with bounds checking. */
+export function getMaxToolConcurrency(settings?: CoderSettings): number {
+  const val = settings?.max_tool_concurrency;
+  if (typeof val === 'number' && val >= 1 && val <= 256) return val;
+  return 32;
 }
 
 // ---------------------------------------------------------------------------

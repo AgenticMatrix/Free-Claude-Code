@@ -14,5 +14,5 @@ export const schema: ToolSchema = {
     },
     required: ['taskId'],
   },
-  _meta: { riskLevel: 'safe' },
+  _meta: { riskLevel: 'safe', isConcurrencySafe: true },
 };

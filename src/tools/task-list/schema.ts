@@ -9,5 +9,5 @@ export const schema: ToolSchema = {
     properties: {},
     required: [],
   },
-  _meta: { riskLevel: 'safe' },
+  _meta: { riskLevel: 'safe', isConcurrencySafe: true },
 };

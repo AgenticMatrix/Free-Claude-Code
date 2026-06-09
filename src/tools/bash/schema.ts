@@ -26,5 +26,5 @@ export const schema: ToolSchema = {
     },
     required: ['command'],
   },
-  _meta: { riskLevel: 'mutation' },
+  _meta: { riskLevel: 'mutation', isConcurrencySafe: true },
 };

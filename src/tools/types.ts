@@ -16,6 +16,8 @@ import type Anthropic from '@anthropic-ai/sdk';
 
 export interface ToolMeta {
   riskLevel: 'safe' | 'mutation' | 'destructive';
+  /** When true, this tool can execute concurrently with other safe tools. */
+  isConcurrencySafe?: boolean;
 }
 
 /** Anthropic tool definition + our metadata. */

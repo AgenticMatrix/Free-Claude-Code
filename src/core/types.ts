@@ -223,6 +223,7 @@ export interface ToolDefinition {
   description: string;
   input_schema: Record<string, unknown>;
   riskLevel?: RiskLevel;
+  isConcurrencySafe?: boolean;
 }
 
 export interface ToolExecutionResult {
