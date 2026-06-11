@@ -9,6 +9,7 @@ import { MessageBubble } from './MessageBubble.js';
 import { InputBox } from './InputBox.js';
 import { StatusBar } from './StatusBar.js';
 import { ApprovalPrompt } from './ApprovalPrompt.js';
+import { SubAgentTranscriptView } from './SubAgentTranscriptView.js';
 import { useChatReducer } from '../hooks/useChatReducer.js';
 import { useAgentBridge } from '../hooks/useAgentBridge.js';
 import { useInputHandler } from '../hooks/useInputHandler.js';
@@ -79,6 +80,7 @@ export function App({ config, engine }: AppProps) {
     dispatch,
     onSend: runAgentTurn,
     blocked: state.approvalReq !== null,
+    subAgentView: state.subAgentView,
     history: state.history,
     historyIndex: state.historyIndex,
     historyScratch: state.historyScratch,
@@ -137,31 +139,40 @@ export function App({ config, engine }: AppProps) {
 
       {/* ── Live zone: current turn + input ────────────────────── */}
       <Box flexDirection="column" flexGrow={1} paddingX={1}>
-        {messages.length === 0 && !state.isStreaming && (
-          <Box marginY={1}>
-            <Text dimColor>
-              Welcome to Coder Chat TUI! Type a message and press Enter to start.
-            </Text>
-          </Box>
-        )}
+        {state.subAgentView ? (
+          <SubAgentTranscriptView
+            agentId={state.subAgentView.agentId}
+            onBack={() => dispatch({ type: 'CLOSE_SUBAGENT_VIEW' })}
+          />
+        ) : (
+          <>
+            {messages.length === 0 && !state.isStreaming && (
+              <Box marginY={1}>
+                <Text dimColor>
+                  Welcome to Coder Chat TUI! Type a message and press Enter to start.
+                </Text>
+              </Box>
+            )}
 
-        {live.map((message) => (
-          <MessageBubble key={message.id} message={message} contentExpanded={state.contentExpanded} />
-        ))}
+            {live.map((message) => (
+              <MessageBubble key={message.id} message={message} contentExpanded={state.contentExpanded} />
+            ))}
 
-        {state.isStreaming && (
-          <Box marginTop={1}>
-            <Text color="yellow" dimColor>● Generating...</Text>
-          </Box>
-        )}
+            {state.isStreaming && (
+              <Box marginTop={1}>
+                <Text color="yellow" dimColor>● Generating...</Text>
+              </Box>
+            )}
 
-        {state.approvalReq && (
-          <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
-            <ApprovalPrompt
-              req={state.approvalReq}
-              onChoice={handleApprovalChoice}
-            />
-          </Box>
+            {state.approvalReq && (
+              <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
+                <ApprovalPrompt
+                  req={state.approvalReq}
+                  onChoice={handleApprovalChoice}
+                />
+              </Box>
+            )}
+          </>
         )}
       </Box>
 

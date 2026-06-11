@@ -121,4 +121,18 @@ export const coreCommands: SlashCommand[] = [
       ctx.sys(`Status bar: ${next}`);
     },
   },
+
+  {
+    help: 'view sub-agent transcript',
+    name: 'agent',
+    usage: '/agent <agent-id>',
+    run: (arg, ctx) => {
+      const agentId = arg.trim();
+      if (!agentId) {
+        ctx.sys('Usage: /agent <agent-id> — view a sub-agent transcript');
+        return;
+      }
+      ctx.dispatch({ type: 'OPEN_SUBAGENT_VIEW', agentId });
+    },
+  },
 ];

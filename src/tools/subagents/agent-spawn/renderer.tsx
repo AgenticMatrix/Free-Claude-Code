@@ -130,6 +130,8 @@ export const AgentSpawnRenderer: ToolUseRenderer = (props) => {
       ),
     ),
     isDone && resultLines.length === 0 && React.createElement(Text, { color: 'green' }, '  Done'),
+    // View transcript hint
+    isDone && React.createElement(Text, { dimColor: true }, '  Ctrl+T to view full transcript'),
     // Error
     props.state === 'error' && props.result?.isError &&
       React.createElement(Text, { color: 'red' }, `  Error: ${(props.result.content as string).slice(0, 100)}`),

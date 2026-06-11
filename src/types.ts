@@ -194,6 +194,8 @@ export interface ChatState {
   pasteBlocks: Record<number, string>;
   /** Global toggle for content-level expansion (thinking, tool results). */
   contentExpanded: boolean;
+  /** When set, renders a sub-agent transcript view instead of the main chat. */
+  subAgentView: { agentId: string } | null;
 }
 
 // ── Chat actions ────────────────────────────────────────────────────
@@ -224,6 +226,8 @@ export type ChatAction =
   | { type: 'TOGGLE_TOOLS'; id: number }
   | { type: 'TOGGLE_ALL_EXPAND' }
   | { type: 'TOGGLE_ALL_CONTENT' }
+  | { type: 'OPEN_SUBAGENT_VIEW'; agentId: string }
+  | { type: 'CLOSE_SUBAGENT_VIEW' }
   | { type: 'SET_MODE'; mode: AgentMode }
   | { type: 'SET_ERROR'; error: string }
   | { type: 'CLEAR_ERROR' }

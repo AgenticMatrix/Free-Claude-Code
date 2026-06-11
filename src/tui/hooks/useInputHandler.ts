@@ -2,6 +2,7 @@ import { useInput } from 'ink';
 
 import type { Message, ChatAction } from '../../types.js';
 import { expandPasteMarkers } from './useChatReducer.js';
+import { getSubAgentRegistry } from '../../tools/subagents/agent-spawn/registry-ref.js';
 
 export interface InputHandlerDeps {
   inputText: string;
@@ -22,6 +23,8 @@ export interface InputHandlerDeps {
   historyScratch: string;
   /** Paste block contents for expanding markers before send. */
   pasteBlocks: Record<number, string>;
+  /** Current sub-agent view state (null = main chat). */
+  subAgentView?: { agentId: string } | null;
 }
 
 /**
@@ -32,6 +35,8 @@ export interface InputHandlerDeps {
  *   Escape      — clear input
  *   Ctrl+E      — toggle expand / collapse tool blocks
    Ctrl+D      — toggle expand / collapse block content (thinking, etc.)
+   Ctrl+T      — view sub-agent transcript
+   Esc         — close sub-agent view / clear input
  *   ← → Home End — cursor movement
  *   Backspace/Del — deletion
  *   Printable   — insert at cursor
@@ -49,18 +54,46 @@ export function useInputHandler({
   historyIndex,
   historyScratch,
   pasteBlocks,
+  subAgentView,
 }: InputHandlerDeps) {
   useInput(
     (input, key) => {
-      // When an approval overlay is active, suppress normal input.
-      // The ApprovalPrompt component handles its own input.
-      if (blocked) return;
-
+      // Always allow Escape and Ctrl+T (for navigating sub-agent views)
       if (key.escape) {
+        if (subAgentView) {
+          dispatch({ type: 'CLOSE_SUBAGENT_VIEW' });
+          return;
+        }
+        if (blocked) return;
         dispatch({ type: 'SET_INPUT', text: '' });
         dispatch({ type: 'SET_HISTORY_INDEX', index: -1 });
         return;
       }
+
+      // Ctrl+T toggles sub-agent transcript view
+      if (key.ctrl && input === 't') {
+        if (subAgentView) {
+          dispatch({ type: 'CLOSE_SUBAGENT_VIEW' });
+          return;
+        }
+        const registry = getSubAgentRegistry();
+        if (registry) {
+          const doneAgents = registry.listByStatus('done');
+          if (doneAgents.length > 0) {
+            const latest = doneAgents.reduce((a, b) =>
+              (a.finishedAt ?? 0) > (b.finishedAt ?? 0) ? a : b,
+            );
+            dispatch({ type: 'OPEN_SUBAGENT_VIEW', agentId: latest.id });
+          }
+        }
+        return;
+      }
+
+      // When an approval overlay is active, suppress normal input.
+      if (blocked) return;
+
+      // Block sending messages while viewing a sub-agent transcript (allow slash commands)
+      if (subAgentView && key.return && !inputText.startsWith('/')) return;
 
       // Ctrl+E toggles expand / collapse of tool blocks
       if (key.ctrl && input === 'e') {

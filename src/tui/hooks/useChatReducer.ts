@@ -282,6 +282,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       };
     }
 
+    case 'OPEN_SUBAGENT_VIEW':
+      return { ...state, subAgentView: { agentId: action.agentId } };
+
+    case 'CLOSE_SUBAGENT_VIEW':
+      return { ...state, subAgentView: null };
+
     case 'SET_MODE':
       return { ...state, mode: action.mode };
 
@@ -422,6 +428,7 @@ export function createInitialState(model: string): ChatState {
     historyScratch: '',
     pasteBlocks: {},
     contentExpanded: false,
+    subAgentView: null,
   };
 }
 
