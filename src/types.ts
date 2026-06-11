@@ -192,6 +192,8 @@ export interface ChatState {
   historyScratch: string;
   /** Paste block contents keyed by ID (IDs embedded as markers in inputText). */
   pasteBlocks: Record<number, string>;
+  /** Global toggle for content-level expansion (thinking, tool results). */
+  contentExpanded: boolean;
 }
 
 // ── Chat actions ────────────────────────────────────────────────────
@@ -220,6 +222,8 @@ export type ChatAction =
   | { type: 'SET_TOOL_USE_RESULT'; toolId: string; duration?: number; result: ToolUseBlock['result'] }
   | { type: 'TOGGLE_THINKING'; id: number }
   | { type: 'TOGGLE_TOOLS'; id: number }
+  | { type: 'TOGGLE_ALL_EXPAND' }
+  | { type: 'TOGGLE_ALL_CONTENT' }
   | { type: 'SET_MODE'; mode: AgentMode }
   | { type: 'SET_ERROR'; error: string }
   | { type: 'CLEAR_ERROR' }

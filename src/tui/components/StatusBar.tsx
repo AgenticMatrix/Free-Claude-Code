@@ -164,6 +164,14 @@ export function StatusBar({ model, isStreaming, error, totalChars, inputTokens, 
 
       <Sep />
 
+      <Text dimColor>Ctrl+E blocks</Text>
+
+      <Sep />
+
+      <Text dimColor>Ctrl+O content</Text>
+
+      <Sep />
+
       <Text dimColor>Ctrl+C to exit</Text>
     </Box>
   );

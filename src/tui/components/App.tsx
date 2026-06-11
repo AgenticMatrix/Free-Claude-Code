@@ -131,7 +131,7 @@ export function App({ config, engine }: AppProps) {
       <Static items={staticItems}>
         {(item) => {
           if (item._type === 'header') return <HeaderLogo key="header" />;
-          return <MessageBubble key={item.msg.id} message={item.msg} />;
+          return <MessageBubble key={item.msg.id} message={item.msg} contentExpanded={state.contentExpanded} />;
         }}
       </Static>
 
@@ -146,7 +146,7 @@ export function App({ config, engine }: AppProps) {
         )}
 
         {live.map((message) => (
-          <MessageBubble key={message.id} message={message} />
+          <MessageBubble key={message.id} message={message} contentExpanded={state.contentExpanded} />
         ))}
 
         {state.isStreaming && (

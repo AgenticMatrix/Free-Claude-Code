@@ -30,7 +30,8 @@ export interface InputHandlerDeps {
  * Keys:
  *   Enter       — send message
  *   Escape      — clear input
- *   Ctrl+E      — toggle thinking of last assistant message
+ *   Ctrl+E      — toggle expand / collapse tool blocks
+   Ctrl+O      — toggle expand / collapse block content (thinking, etc.)
  *   ← → Home End — cursor movement
  *   Backspace/Del — deletion
  *   Printable   — insert at cursor
@@ -61,20 +62,15 @@ export function useInputHandler({
         return;
       }
 
-      // Ctrl+E toggles thinking / tool expansion of the last assistant message
+      // Ctrl+E toggles expand / collapse of tool blocks
       if (key.ctrl && input === 'e') {
-        const lastAssistant = [...messages]
-          .reverse()
-          .find((m) => m.role === 'assistant');
-        if (lastAssistant) {
-          const hasThinking = lastAssistant.thinking || lastAssistant.blocks.some(b => b.type === 'thinking');
-          const hasTools = lastAssistant.blocks.filter(b => b.type === 'tool_use').length > 3;
-          if (hasTools) {
-            dispatch({ type: 'TOGGLE_TOOLS', id: lastAssistant.id });
-          } else if (hasThinking) {
-            dispatch({ type: 'TOGGLE_THINKING', id: lastAssistant.id });
-          }
-        }
+        dispatch({ type: 'TOGGLE_ALL_EXPAND' });
+        return;
+      }
+
+      // Ctrl+O toggles expand / collapse of block content (thinking, etc.)
+      if (key.ctrl && input === 'o') {
+        dispatch({ type: 'TOGGLE_ALL_CONTENT' });
         return;
       }
 

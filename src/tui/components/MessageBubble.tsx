@@ -16,6 +16,7 @@ import { CompletionBoundaryRenderer } from './blocks/CompletionBoundaryRenderer.
 
 interface MessageBubbleProps {
   message: Message;
+  contentExpanded?: boolean;
 }
 
 /** Extract display text from blocks (text blocks concatenated). */
@@ -75,7 +76,7 @@ function buildParamSummary(input: Record<string, unknown>): string {
  * Tool blocks are rendered via the tool registry (getToolUseRenderer / getToolResultRenderer),
  * allowing per-tool specialised renderers to be swapped in.
  */
-export function MessageBubble({ message }: MessageBubbleProps) {
+export function MessageBubble({ message, contentExpanded }: MessageBubbleProps) {
   const { role } = message;
 
   // ── Determine content source ──────────────────────────────
@@ -143,6 +144,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           permissionState={tu.permissionState}
           duration={tu.duration}
           result={tu.result}
+          contentExpanded={contentExpanded}
         />
       );
     }
@@ -160,6 +162,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           duration={tr.duration}
           toolName={tr.toolName}
           metadata={tr.metadata}
+          contentExpanded={contentExpanded}
         />
       );
     }
@@ -301,10 +304,10 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                       <Box paddingLeft={2} flexDirection="column">
                         <Text dimColor color="grey">{displayText}</Text>
                         {collapsed ? (
-                          <Text dimColor color="grey">{'... (Ctrl+E to expand)'}</Text>
+                          <Text dimColor color="grey">{'... (Ctrl+O to toggle)'}</Text>
                         ) : null}
                         {tooLong && message.thinkingExpanded ? (
-                          <Text dimColor color="grey">{'(Ctrl+E to collapse)'}</Text>
+                          <Text dimColor color="grey">{'(Ctrl+O to toggle)'}</Text>
                         ) : null}
                       </Box>
                     </Box>
@@ -337,12 +340,12 @@ export function MessageBubble({ message }: MessageBubbleProps) {
               {executingCount > 0 ? ` · ${executingCount} executing` : ''}
               {pendingCount > 0 ? ` · ${pendingCount} queued` : ''}
               {doneCount > 0 ? ` · ${doneCount} completed` : ''}
-              {' '}(Ctrl+E to expand)
+              {' '}(Ctrl+E to toggle tools)
             </Text>
           </Box>
         ) : totalTools > TOOL_COLLAPSE_THRESHOLD && message.toolsExpanded ? (
           <Box marginBottom={1}>
-            <Text dimColor>(Ctrl+E to collapse tools)</Text>
+            <Text dimColor>(Ctrl+E to toggle tools)</Text>
           </Box>
         ) : null}
 

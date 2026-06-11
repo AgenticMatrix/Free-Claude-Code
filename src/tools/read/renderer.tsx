@@ -33,7 +33,7 @@ export function ReadRenderer(props: ToolUseRendererProps): React.ReactNode {
     ? result.content.split('\n').filter((l) => l !== '')
     : [];
   const hasResult = isDone && result && resultLines.length > 0;
-  const tooLong = resultLines.length > COLLAPSE_THRESHOLD;
+  const tooLong = !props.contentExpanded && resultLines.length > COLLAPSE_THRESHOLD;
   const displayLines = tooLong ? resultLines.slice(0, COLLAPSE_THRESHOLD) : resultLines;
   const hiddenCount = resultLines.length - COLLAPSE_THRESHOLD;
 

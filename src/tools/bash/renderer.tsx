@@ -82,7 +82,7 @@ export function BashRenderer(props: ToolUseRendererProps): React.ReactNode {
   const stderrLines = stderr ? stderr.split('\n').filter(l => l !== '') : [];
   const emptiness = stdoutLines.length === 0 && stderrLines.length === 0;
 
-  const tooLong = stdoutLines.length > COLLAPSE_THRESHOLD;
+  const tooLong = !props.contentExpanded && stdoutLines.length > COLLAPSE_THRESHOLD;
   const displayOutLines = tooLong ? stdoutLines.slice(0, COLLAPSE_THRESHOLD) : stdoutLines;
   const hiddenCount = stdoutLines.length - COLLAPSE_THRESHOLD;
 

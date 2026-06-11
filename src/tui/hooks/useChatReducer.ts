@@ -252,6 +252,36 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ),
       };
 
+    case 'TOGGLE_ALL_EXPAND': {
+      const hasCollapsedTools = state.messages.some((m) => {
+        const toolCount = m.blocks.filter(b => b.type === 'tool_use').length;
+        return toolCount > 3 && !m.toolsExpanded;
+      });
+      return {
+        ...state,
+        messages: state.messages.map((m) => ({
+          ...m,
+          toolsExpanded: hasCollapsedTools ? true : false,
+        })),
+      };
+    }
+
+    case 'TOGGLE_ALL_CONTENT': {
+      const hasCollapsedContent = state.messages.some((m) => {
+        const hasThinking = !!m.thinking || m.blocks.some(b => b.type === 'thinking');
+        return hasThinking && !m.thinkingExpanded;
+      });
+      const expandContent = hasCollapsedContent || !state.contentExpanded;
+      return {
+        ...state,
+        contentExpanded: expandContent,
+        messages: state.messages.map((m) => ({
+          ...m,
+          thinkingExpanded: expandContent ? true : false,
+        })),
+      };
+    }
+
     case 'SET_MODE':
       return { ...state, mode: action.mode };
 
@@ -391,6 +421,7 @@ export function createInitialState(model: string): ChatState {
     historyIndex: -1,
     historyScratch: '',
     pasteBlocks: {},
+    contentExpanded: false,
   };
 }
 

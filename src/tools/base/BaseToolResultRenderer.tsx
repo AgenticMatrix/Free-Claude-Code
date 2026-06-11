@@ -15,9 +15,10 @@ export function BaseToolResultRenderer({
   isError,
   truncated,
   collapseThreshold = 5,
+  contentExpanded,
 }: ToolResultRendererProps) {
   const lines = content.split('\n');
-  const tooLong = lines.length > collapseThreshold;
+  const tooLong = !contentExpanded && lines.length > collapseThreshold;
   const displayLines = tooLong ? lines.slice(0, collapseThreshold) : lines;
   const displayText = displayLines.join('\n');
 

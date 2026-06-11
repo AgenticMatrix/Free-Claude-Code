@@ -18,6 +18,8 @@ const AGENT_LABELS: Record<string, string> = {
 
 const RESULT_COLLAPSE = 12;
 
+const SPINNER_FRAMES = ['◐', '◓', '◑', '◒'];
+
 export const AgentSpawnRenderer: ToolUseRenderer = (props) => {
   // Don't render a placeholder while the LLM is still streaming the input.
   if (props.state === 'pending') return null;
@@ -32,7 +34,7 @@ export const AgentSpawnRenderer: ToolUseRenderer = (props) => {
   const isExecuting = props.state === 'executing';
   const resultContent: string | undefined = isDone ? (props.result?.content as string) : undefined;
   const resultLines = resultContent ? resultContent.split('\n') : [];
-  const tooLong = resultLines.length > RESULT_COLLAPSE;
+  const tooLong = !props.contentExpanded && resultLines.length > RESULT_COLLAPSE;
   const displayLines = tooLong ? resultLines.slice(0, RESULT_COLLAPSE) : resultLines;
 
   // ── Live elapsed timer ──────────────────────────────────────
@@ -62,6 +64,14 @@ export const AgentSpawnRenderer: ToolUseRenderer = (props) => {
     const timer = setInterval(poll, 500);
     return () => clearInterval(timer);
   }, [isExecuting, prompt, agentType]);
+
+  // ── Spinner animation ──────────────────────────────────────
+  const [spinnerIdx, setSpinnerIdx] = useState(0);
+  useEffect(() => {
+    if (!isExecuting) return;
+    const timer = setInterval(() => setSpinnerIdx(i => (i + 1) % SPINNER_FRAMES.length), 120);
+    return () => clearInterval(timer);
+  }, [isExecuting]);
 
   // ── Duration display value ──────────────────────────────────
   const displayDuration = isDone && props.duration !== undefined
@@ -95,7 +105,7 @@ export const AgentSpawnRenderer: ToolUseRenderer = (props) => {
     React.createElement(
       Box,
       { flexDirection: 'row', justifyContent: 'space-between' },
-      React.createElement(Text, { bold: true, color: 'cyan' }, `${icon} ${label}`),
+      React.createElement(Text, { bold: true, color: 'cyan' }, isExecuting ? `${SPINNER_FRAMES[spinnerIdx]} ${label}` : `${icon} ${label}`),
       displayDuration !== undefined
         ? isExecuting
           ? React.createElement(Text, { dimColor: true }, `⏱ ${formatDuration(displayDuration)}`)
